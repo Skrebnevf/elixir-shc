@@ -42,6 +42,7 @@ defmodule ChatServer.Server do
   alias ChatServer.ClientRegistry
   alias ChatServer.CertificateManager
   alias ChatServer.Protocol
+  alias ChatServer.ClientSupervisor
   require Logger
   use GenServer
 
