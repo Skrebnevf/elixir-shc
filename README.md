@@ -121,12 +121,13 @@ The server uses a custom binary protocol:
 ```
 
 ### Chat Messages
-
+Client message
 ```json
-// Client message
 {"type": "message", "content": "foo", "sender": "anon"}
+```
 
-// Server broadcast (includes sender IP)
+Server broadcast (includes sender IP)
+```json
 {"type": "message", "content": "foo", "sender": "anon", "sender_ip": "192.168.1.100"}
 ```
 
@@ -164,7 +165,7 @@ mix docs
 
 ## Requirements
 
-- Elixir 1.12+
+- Elixir 1.18+
 - Erlang/OTP 24+
 - OpenSSL (for certificate generation)
 
