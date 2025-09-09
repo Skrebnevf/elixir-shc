@@ -110,12 +110,13 @@ The server uses a custom binary protocol:
 ```
 
 ### Authentication Messages
-
+Client authentication request
 ```json
-// Client authentication request
 {"type": "auth", "password": "user_password"}
+```
 
-// Server authentication response
+Server authentication response
+```json
 {"type": "auth_result", "success": true}
 {"type": "auth_result", "success": false, "error": "Invalid password"}
 ```
