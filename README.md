@@ -54,7 +54,7 @@ config :chatserver, ChatServer.Server,
   host: {:system, "HOST", :string}
 ```
 
-For test, use environment variables:
+For test:
 
 ```elixir
 config :chatserver, ChatServer.Server,
