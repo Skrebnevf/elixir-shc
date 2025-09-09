@@ -78,6 +78,9 @@ mix run --no-halt
 ```bash
 mix run --no-halt
 # Enter server password: mysecretpassword
+
+# For Production mode 
+MIX_ENV=prod mix run --no-halt
 ```
 
 ### Server Output
