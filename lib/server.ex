@@ -90,6 +90,32 @@ defmodule ChatServer.Server do
     {:noreply, state}
   end
 
+  def handle_cast(:stop, state) do
+    Logger.warning("Stop server signal detected")
+
+    ClientRegistry.get_all_clients()
+    |> Enum.each(fn {_client_pid, %{socket: client_socet}} ->
+      :ssl.close(client_socet)
+    end)
+
+    ClientRegistry.get_all_clients()
+    |> Enum.each(fn {client_pid, _info} ->
+      if Process.alive?(client_pid) do
+        Process.exit(client_pid, :shutdown)
+      end
+    end)
+
+    :ssl.close(state.listen_socket)
+
+    DynamicSupervisor.stop(ChatServer.ClientSupervisor, :shutdown)
+
+    Logger.warning("Server cleanup")
+
+    :timer.sleep(300)
+
+    System.halt(0)
+  end
+
   def handle_cast({:message, sender_pid, msg}, state) do
     sender_ip =
       case Registry.lookup(ClientRegistry, sender_pid) do
@@ -244,8 +270,15 @@ defmodule ChatServer.Server do
   defp message_loop(socket) do
     case Protocol.recv_message(socket) do
       {:ok, message} ->
-        GenServer.cast(__MODULE__, {:message, self(), message})
-        message_loop(socket)
+        case message do
+          %{"type" => "kill", "text" => _} ->
+            GenServer.cast(__MODULE__, :stop)
+            :ssl.close(socket)
+
+          %{"type" => "chat", "text" => _} ->
+            GenServer.cast(__MODULE__, {:message, self(), message})
+            message_loop(socket)
+        end
 
       {:error, :closed} ->
         Logger.warning("Client disconnected")
