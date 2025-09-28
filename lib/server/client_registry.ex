@@ -56,8 +56,8 @@ defmodule ChatServer.ClientRegistry do
     }
   end
 
-  def register_client(socket, ip) do
-    Registry.register(__MODULE__, self(), %{socket: socket, ip: ip})
+  def register_client(socket, ip, username) do
+    Registry.register(__MODULE__, self(), %{socket: socket, ip: ip, username: username})
   end
 
   def get_all_clients do

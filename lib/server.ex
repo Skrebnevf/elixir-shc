@@ -117,13 +117,17 @@ defmodule ChatServer.Server do
   end
 
   def handle_cast({:message, sender_pid, msg}, state) do
-    sender_ip =
+    {sender_ip, sender_name} =
       case Registry.lookup(ClientRegistry, sender_pid) do
-        [{_pid, %{ip: ip}}] -> ip
-        [] -> "unknown"
+        [{_pid, %{ip: ip, username: username}}] -> {ip, username}
+        [] -> {"unknown", "unknown"}
       end
 
-    message_data = Map.put(msg, "sender_ip", sender_ip)
+    message_data =
+      msg
+      |> Map.put("sender_ip", sender_ip)
+      |> Map.put("sender_name", sender_name)
+
     encoded_message = Protocol.encode_message(message_data)
 
     ClientRegistry.get_all_clients()
@@ -227,16 +231,16 @@ defmodule ChatServer.Server do
         readable_ip = :inet.ntoa(ip) |> to_string()
 
         case Protocol.recv_message(socket) do
-          {:ok, %{"type" => "auth", "password" => client_password}} ->
+          {:ok, %{"type" => "auth", "password" => client_password, "username" => username}} ->
             client_password_hash =
               :crypto.hash(:sha256, client_password)
               |> Base.encode64()
 
             if client_password_hash == password_hash do
-              ClientRegistry.register_client(socket, readable_ip)
+              ClientRegistry.register_client(socket, readable_ip, username)
               auth_response = %{"type" => "auth_result", "success" => true}
               :ssl.send(socket, Protocol.encode_message(auth_response))
-              Logger.info("Client authenticated successfully from #{readable_ip}")
+              Logger.info("Client #{username} authenticated successfully from #{readable_ip}")
               message_loop(socket)
             else
               auth_response = %{
@@ -246,7 +250,7 @@ defmodule ChatServer.Server do
               }
 
               :ssl.send(socket, Protocol.encode_message(auth_response))
-              Logger.warning("Authentication failed for client #{readable_ip}")
+              Logger.warning("Authentication failed for client #{username} from #{readable_ip}")
               :ssl.close(socket)
               exit(:normal)
             end
