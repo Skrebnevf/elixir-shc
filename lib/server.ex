@@ -46,6 +46,9 @@ defmodule ChatServer.Server do
   require Logger
   use GenServer
 
+  @max_message_size 64 * 1024
+  @recv_timeout :infinity
+
   def start_link(opts \\ []) do
     config = Application.get_env(:chatserver, __MODULE__, [])
 
@@ -116,24 +119,13 @@ defmodule ChatServer.Server do
     System.halt(0)
   end
 
-  def handle_cast({:message, sender_pid, msg}, state) do
-    {sender_ip, sender_name} =
-      case Registry.lookup(ClientRegistry, sender_pid) do
-        [{_pid, %{ip: ip, username: username}}] -> {ip, username}
-        [] -> {"unknown", "unknown"}
-      end
-
-    message_data =
-      msg
-      |> Map.put("sender_ip", sender_ip)
-      |> Map.put("sender_name", sender_name)
-
-    encoded_message = Protocol.encode_message(message_data)
+  def handle_cast({:message, sender_pid, raw_msg}, state) do
+    Logger.info("Relaying message to clients")
 
     ClientRegistry.get_all_clients()
     |> Enum.each(fn {client_pid, %{socket: client_socket}} ->
       if client_pid != sender_pid do
-        :ssl.send(client_socket, encoded_message)
+        :ssl.send(client_socket, raw_msg)
       end
     end)
 
@@ -271,23 +263,72 @@ defmodule ChatServer.Server do
     end
   end
 
-  defp message_loop(socket) do
-    case Protocol.recv_message(socket) do
-      {:ok, message} ->
-        case message do
-          %{"type" => "kill", "text" => _} ->
-            GenServer.cast(__MODULE__, :stop)
-            :ssl.close(socket)
+  defp read_full_message(socket) do
+    case :ssl.recv(socket, 4, @recv_timeout) do
+      {:ok, <<"MSGE">>} ->
+        case :ssl.recv(socket, 4, @recv_timeout) do
+          {:ok, <<0, 0, 0, 0>>} ->
+            {:kill_command}
 
-          %{"type" => "chat", "text" => _} ->
-            GenServer.cast(__MODULE__, {:message, self(), message})
-            message_loop(socket)
+          {:ok, message} ->
+            header = <<"MSGE">> <> message
+            size = :binary.decode_unsigned(header, :big)
+
+            if size > @max_message_size do
+              Logger.warning("Message too large: #{size}")
+              {:error, :message_too_large}
+            else
+              case :ssl.recv(socket, size, @recv_timeout) do
+                {:ok, body} ->
+                  {:ok, header <> body}
+
+                error ->
+                  Logger.warning("Recv body error: #{inspect(error)}")
+                  error
+              end
+            end
         end
+
+      {:ok, header} ->
+        size = :binary.decode_unsigned(header, :big)
+
+        if size > @max_message_size do
+          Logger.warning("Message too large: #{size}")
+          {:error, :message_too_large}
+        else
+          case :ssl.recv(socket, size, @recv_timeout) do
+            {:ok, body} ->
+              {:ok, header <> body}
+
+            error ->
+              Logger.warning("Recv body error: #{inspect(error)}")
+              error
+          end
+        end
+
+      error ->
+        Logger.warning("Recv header error: #{inspect(error)}")
+        error
+    end
+  end
+
+  defp message_loop(socket) do
+    case read_full_message(socket) do
+      {:kill_command} ->
+        Logger.warning("KILL command received")
+        GenServer.cast(__MODULE__, :stop)
+
+      {:ok, binary_data} ->
+        GenServer.cast(__MODULE__, {:message, self(), binary_data})
+        message_loop(socket)
 
       {:error, :closed} ->
         Logger.warning("Client disconnected")
         :ssl.close(socket)
-        exit(:normal)
+
+      {:error, _} = err ->
+        Logger.warning("Recv error: #{inspect(err)}")
+        :ssl.close(socket)
     end
   end
 end
