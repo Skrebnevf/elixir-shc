@@ -23,4 +23,5 @@ chatapp-*.tar
 /tmp/
 cert.pem
 key.pem
+AGENTS.md
 server_fingerprint.txt

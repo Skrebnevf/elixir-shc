@@ -223,11 +223,7 @@ defmodule ChatServer.Server do
         readable_ip = :inet.ntoa(ip) |> to_string()
 
         case Protocol.recv_message(socket) do
-          {:ok, %{"type" => "auth", "password" => client_password, "username" => username}} ->
-            client_password_hash =
-              :crypto.hash(:sha256, client_password)
-              |> Base.encode64()
-
+          {:ok, %{"type" => "auth", "password" => client_password_hash, "username" => username}} ->
             if client_password_hash == password_hash do
               ClientRegistry.register_client(socket, readable_ip, username)
               auth_response = %{"type" => "auth_result", "success" => true}
