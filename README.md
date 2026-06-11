@@ -10,7 +10,9 @@ A secure SSL/TLS chat server built with Elixir that supports multiple authentica
 - **Multi-client Support** - Handles multiple concurrent client connections
 - **Client Tracking** - Tracks connected clients with IP addresses
 - **Process Supervision** - Fault-tolerant with proper supervision trees
-- **Certificate Management** - Automatic SSL certificate generation and fingerprint verification
+- **Rate Limiting** - Protections against abuse: 1-second delay on failed auth, per-IP connection limit (10), global connection limit (300), and mailbox overflow protection
+- **Certificate Auto-Regeneration** - SSL certificates are recreated fresh on every server start, old files are cleaned up
+- **No Persistent Storage** - All data lives in memory; server leaves no trace on disk after shutdown
 
 ## Architecture
 
@@ -51,7 +53,14 @@ For production deployments, use environment variables:
 ```elixir
 config :chatserver, ChatServer.Server,
   port: {:system, "PORT", :integer},
-  host: {:system, "HOST", :string}
+  host: {:system, "HOST", :string},
+  max_global_connections: {:system, "MAX_CLIENTS", :integer}
+```
+
+Set the maximum number of simultaneous clients:
+
+```bash
+export MAX_CLIENTS=500
 ```
 
 For test:
@@ -59,35 +68,59 @@ For test:
 ```elixir
 config :chatserver, ChatServer.Server,
   port: 4041,
-  host: "127.0.0.1"
+  host: "127.0.0.1",
+  max_global_connections: 300
+```
+
+For development (`config/config.exs`):
+
+```elixir
+config :chatserver, ChatServer.Server,
+  port: 4040,
+  host: "127.0.0.1",
+  max_global_connections: 300
 ```
 
 ## Usage
 
 ### Starting the Server
 
-#### Method 1: With Environment Variable
+#### Method 1: Using the Launch Script (Recommended)
+
+```bash
+export CHAT_SERVER_PASSWORD=mysecretpassword
+./bin/server
+```
+
+The `bin/server` script passes the correct VM flags for Ctrl+C handling
+and cleans up certificate files on exit.
+
+#### Method 2: With Environment Variable
 
 ```bash
 export CHAT_SERVER_PASSWORD=mysecretpassword
 mix run --no-halt
 ```
 
-#### Method 2: Interactive Input
+#### Method 3: Interactive Input
 
 ```bash
 mix run --no-halt
 # Enter server password: mysecretpassword
-
-# For Production mode 
-MIX_ENV=prod mix run --no-halt
 ```
+
+> In non-interactive environments (Docker, CI) you **must** use the
+> `CHAT_SERVER_PASSWORD` environment variable. If neither is available,
+> the server will exit with an error.
 
 ### Server Output
 
 When started, the server will display:
 
 ```
+Enter server password:
+Server password set successfully...
+
 ======================================================================
 SERVER CERTIFICATE FINGERPRINT:
 a1:b2:c3:d4:e5:f6:78:90:ab:cd:ef:12:34:56:78:90:ab:cd:ef:12:34:56:78:90:ab:cd:ef:12:34:56:78:90
@@ -98,7 +131,6 @@ export CHAT_SERVER_FINGERPRINT=a1b2c3d4e5f67890abcdef1234567890abcdef1234567890a
 Clients without fingerprint will show security warning
 ======================================================================
 
-Server password set successfully...
 [info] server started on port -> 4000 and ip -> {127, 0, 0, 1}
 ```
 
@@ -113,9 +145,9 @@ The server uses a custom binary protocol:
 ```
 
 ### Authentication Messages
-Client authentication request
+Client authentication request (username is required; password is SHA256 hash encoded in Base64)
 ```json
-{"type": "auth", "password": "user_password"}
+{"type": "auth", "password": "m0Hx7RfmTM3sJ0x7Jh2M0Hx7RfmTM3sJ0x7Jh2M0Hx7Rg=", "username": "alice"}
 ```
 
 Server authentication response
@@ -127,25 +159,25 @@ Server authentication response
 ### Chat Messages
 Client message
 ```json
-{"type": "message", "content": "foo", "sender": "anon"}
+{"type": "message", "content": "foo", "sender": "alice"}
 ```
 
-Server broadcast (includes sender IP)
+Server broadcast (same format, relayed to all other clients)
 ```json
-{"type": "message", "content": "foo", "sender": "anon", "sender_ip": "192.168.1.100"}
+{"type": "message", "content": "foo", "sender": "alice"}
 ```
+
+> The server relays messages as-is without modifying the content or adding fields.
 
 ## SSL Certificates
 
-The server automatically generates self-signed certificates on first run:
-
-- `cert.pem` - SSL certificate
-- `key.pem` - Private key
-- `server_fingerprint.txt` - Certificate fingerprint for client verification
+The server automatically generates fresh self-signed certificates on **every** start. Old files (`cert.pem`, `key.pem`, `server_fingerprint.txt`) are deleted and recreated — each server instance has a unique fingerprint.
 
 ### Certificate Verification
 
-For secure client connections, clients should verify the server certificate using the displayed fingerprint.
+The displayed fingerprint allows **clients** to verify the server's identity. The server itself does not enforce fingerprint checking — it's up to each client to verify the fingerprint before sending sensitive data. Note that the fingerprint changes after each server restart.
+
+When connecting without verification, OpenSSL will show a security warning on the client side.
 
 ## Development
 
@@ -177,19 +209,24 @@ mix docs
 
 - Uses SHA256 for password hashing
 - All communication is encrypted with SSL/TLS
-- Self-signed certificates (suitable for development/internal use)
-- Client IP tracking for monitoring
+- 1-second delay on failed authentication (prevents brute-force)
+- Per-IP connection limit (10 connections per IP)
+- Global connection limit (configurable, default 300)
+- Mailbox overflow protection (drops messages when queue exceeds 1000)
+- Self-signed certificates regenerated on every start
 - Process isolation for fault tolerance
+- No persistent storage — all data is in-memory
 
 ## Production Deployment
 
 For production use:
 
 1. Set strong passwords via environment variables
-2. Consider using proper SSL certificates from a CA
-3. Configure appropriate firewall rules
-4. Monitor server logs for security events
-5. Use proper process management (systemd, Docker, etc.)
+2. Configure connection limits with `MAX_CLIENTS` environment variable
+3. Consider using proper SSL certificates from a trusted CA
+4. Configure appropriate firewall rules
+5. Monitor server logs for security events
+6. Use proper process management (systemd, Docker, etc.)
 
 ## Contributing
 

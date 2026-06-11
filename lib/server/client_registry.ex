@@ -13,19 +13,20 @@ defmodule ChatServer.ClientRegistry do
   Each registered client stores the following metadata:
   - `socket` - The SSL socket for communication
   - `ip` - The client's IP address as a string
+  - `username` - The client's chosen username
 
   ## Usage
   ### Registration
   Client processes register themselves after successful authentication:
 
       # Usually called from within the client process
-      ClientRegistry.register_client(ssl_socket, "192.168.1.100")
+      ClientRegistry.register_client(ssl_socket, "192.168.1.100", "alice")
 
   ### Retrieving Clients
   Get all connected clients for message broadcasting:
 
       clients = ClientRegistry.get_all_clients()
-      # Returns: [{pid1, %{socket: socket1, ip: "192.168.1.100"}}, ...]
+      # Returns: [{pid1, %{socket: socket1, ip: "192.168.1.100", username: "alice"}}, ...]
 
   ## Registry Structure
   The underlying Registry uses the following structure:

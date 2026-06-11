@@ -55,24 +55,29 @@ defmodule ChatServer.CertificateManager do
   @fingerprint_file "server_fingerprint.txt"
 
   def ensure_certificates(host \\ "localhost") do
-    if not files_exist?() do
-      case System.find_executable("openssl") do
-        nil ->
-          raise "OpenSSL not found. Please install OpenSSL to generate certificates."
+    cleanup()
 
-        _path ->
-          cn = determine_common_name(host)
-          generate_certificate(cn)
-      end
+    case System.find_executable("openssl") do
+      nil ->
+        raise "OpenSSL not found. Please install OpenSSL to generate certificates."
+
+      _path ->
+        cn = determine_common_name(host)
+        generate_certificate(cn)
     end
 
     show_certificate_info()
     {@cert_file, @key_file}
   end
 
-  defp files_exist? do
-    File.exists?(@cert_file) and File.exists?(@key_file)
+  def cleanup do
+    Enum.each([@cert_file, @key_file, @fingerprint_file], fn file ->
+      File.rm(file)
+    end)
+
+    :ok
   end
+
 
   defp determine_common_name(host) do
     case host do

@@ -3,48 +3,44 @@ defmodule ChatServer.ClientSupervisor do
   A dynamic supervisor for managing individual chat client processes.
 
   This supervisor handles the lifecycle of client connection processes,
-  automatically starting new processes for each connecting client and
-  cleaning up when clients disconnect.
+  automatically starting new processes for each connecting client. Since
+  clients use `:temporary` restart strategy, terminated processes are
+  **not** restarted — this is intentional: disconnections are normal.
 
   ## Supervision Strategy
-  Uses `:one_for_one` strategy where:
-  - Each client process is supervised independently
-  - If a client process crashes, only that client is restarted
-  - Other client processes remain unaffected
+  Uses `:one_for_one` strategy where each client process is supervised
+  independently. A crash in one client does **not** affect others.
 
   ## Child Process Configuration
-  Client processes are configured as:
-  - **Restart**: `:temporary` - processes are not restarted if they terminate
-  - **ID**: `ChatServer.ClientHandler` - identifier for the child spec
-  - **Start**: Calls `ChatServer.ClientHandler.start_link/1` with the socket
-
-  This configuration is appropriate for client connections because:
-  - Client disconnections are normal and expected
-  - Crashed client processes shouldn't be automatically restarted
-  - Each client manages its own socket lifecycle
+  Client processes are started via `DynamicSupervisor.start_child/2`
+  from `ChatServer.Server`. Each child uses:
+  - **Restart**: `:temporary` — never restarted after termination
+  - **Implementation**: `Task.start/1` — lightweight process running
+    `client_loop/2` which handles auth and messaging
 
   ## Usage
-  The supervisor is typically started as part of the main application
-  supervision tree and used by the main server to spawn client processes:
 
-      # Start a new client process
-      {:ok, client_pid} = ClientSupervisor.start_client(ssl_socket)
+  The supervisor is started as part of the main supervision tree by
+  `ChatServer.Application`. `ChatServer.Server` spawns client processes
+  through it:
 
-  ## Integration
-  This supervisor works with:
-  - `ChatServer.Server` - calls `start_client/1` for new connections
-  - `ChatServer.ClientHandler` - the actual client process implementation
-  - `ChatServer.Application` - includes this supervisor in the supervision tree
+      child_spec = %{
+        id: :client_process,
+        start: {Task, :start, [fn -> client_loop(socket, hash) end]},
+        restart: :temporary
+      }
+      DynamicSupervisor.start_child(ChatServer.ClientSupervisor, child_spec)
 
   ## Process Lifecycle
-  1. Server accepts new SSL connection
-  2. Server calls `ClientSupervisor.start_client(socket)`
-  3. Supervisor starts new `ClientHandler` process
-  4. Client process handles authentication and messaging
-  5. When client disconnects, process terminates and is removed automatically
+  1. `ChatServer.Server.accept_loop/3` accepts new SSL connection
+  2. Server builds a child spec with `Task.start` and passes it to
+     `DynamicSupervisor.start_child/2`
+  3. Client process runs `client_loop/2`: handles auth → `message_loop/1`
+  4. On disconnect or error, the process terminates with `exit(:normal)`
+  5. DynamicSupervisor removes the terminated child automatically
 
-  No manual cleanup is required as the supervisor handles process lifecycle
-  management automatically.
+  No manual cleanup is required — the DynamicSupervisor handles all
+  lifecycle management.
   """
 
   use DynamicSupervisor
@@ -55,15 +51,5 @@ defmodule ChatServer.ClientSupervisor do
 
   def init(:ok) do
     DynamicSupervisor.init(strategy: :one_for_one)
-  end
-
-  def start_client(socket) do
-    spec = %{
-      id: ChatServer.ClientHandler,
-      start: {ChatServer.ClientHandler, :start_link, [socket]},
-      restart: :temporary
-    }
-
-    DynamicSupervisor.start_child(__MODULE__, spec)
   end
 end

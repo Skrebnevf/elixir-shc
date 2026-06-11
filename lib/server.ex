@@ -47,19 +47,52 @@ defmodule ChatServer.Server do
   use GenServer
 
   @max_message_size 64 * 1024
-  @recv_timeout :infinity
+  @recv_timeout :timer.seconds(30)
+  @handshake_timeout :timer.seconds(5)
+  @max_connections_per_ip 10
+  @max_mailbox_size 1000
 
   def start_link(opts \\ []) do
     config = Application.get_env(:chatserver, __MODULE__, [])
 
     port = get_config_value(Keyword.get(opts, :port, config[:port]))
     host = get_config_value(Keyword.get(opts, :host, config[:host]))
+    max_global_connections =
+      get_config_value(Keyword.get(opts, :max_global_connections, config[:max_global_connections]))
 
-    GenServer.start_link(__MODULE__, {host, port}, name: __MODULE__)
+    GenServer.start_link(__MODULE__, {host, port, max_global_connections}, name: __MODULE__)
+  end
+  defp connection_allowed?(ssl_socket) do
+    case :ssl.peername(ssl_socket) do
+      {:ok, {ip, _port}} ->
+        ip_str = :inet.ntoa(ip) |> to_string()
+
+        count =
+          ClientRegistry.get_all_clients()
+          |> Enum.count(fn {_pid, %{ip: client_ip}} -> client_ip == ip_str end)
+
+        if count >= @max_connections_per_ip do
+          Logger.warning(
+            "Connection limit reached for IP #{ip_str} (#{count} >= #{@max_connections_per_ip})"
+          )
+
+          false
+        else
+          true
+        end
+
+      {:error, _} ->
+        Logger.warning("Could not determine client IP, dropping connection")
+        false
+    end
   end
 
-  def init({host, port}) do
+  def init({host, port, max_global_connections}) do
     Process.flag(:trap_exit, true)
+
+    System.at_exit(fn _ ->
+      CertificateManager.cleanup()
+    end)
 
     {cert_file, key_file} = CertificateManager.ensure_certificates(host)
     password_hash = Application.get_env(:chatserver, :password_hash)
@@ -84,25 +117,31 @@ defmodule ChatServer.Server do
 
     Logger.info("server started on port -> #{port} and ip -> #{inspect(bind_ip)}")
 
-    {:ok, %{listen_socket: listen_socket, password_hash: password_hash},
-     {:continue, :accept_loop}}
+    {:ok,
+     %{
+       listen_socket: listen_socket,
+       password_hash: password_hash,
+       max_global_connections: max_global_connections,
+       accept_monitor: nil
+     }, {:continue, :accept_loop}}
   end
 
   def handle_continue(:accept_loop, state) do
-    spawn_link(fn -> accept_loop(state.listen_socket, state.password_hash) end)
-    {:noreply, state}
+    {_pid, ref} =
+      spawn_monitor(fn ->
+        accept_loop(state.listen_socket, state.password_hash, state.max_global_connections)
+      end)
+
+    {:noreply, %{state | accept_monitor: ref}}
   end
 
   def handle_cast(:stop, state) do
     Logger.warning("Stop server signal detected")
 
     ClientRegistry.get_all_clients()
-    |> Enum.each(fn {_client_pid, %{socket: client_socet}} ->
-      :ssl.close(client_socet)
-    end)
+    |> Enum.each(fn {client_pid, %{socket: client_socket}} ->
+      :ssl.close(client_socket)
 
-    ClientRegistry.get_all_clients()
-    |> Enum.each(fn {client_pid, _info} ->
       if Process.alive?(client_pid) do
         Process.exit(client_pid, :shutdown)
       end
@@ -120,16 +159,46 @@ defmodule ChatServer.Server do
   end
 
   def handle_cast({:message, sender_pid, raw_msg}, state) do
-    Logger.info("Relaying message to clients")
+    {:message_queue_len, qlen} = Process.info(self(), :message_queue_len)
 
-    ClientRegistry.get_all_clients()
-    |> Enum.each(fn {client_pid, %{socket: client_socket}} ->
-      if client_pid != sender_pid do
-        :ssl.send(client_socket, raw_msg)
-      end
-    end)
+    if qlen > @max_mailbox_size do
+      Logger.warning("Mailbox too large (#{qlen}), dropping message")
+      {:noreply, state}
+    else
+      Logger.info("Relaying message to clients")
 
-    {:noreply, state}
+      ClientRegistry.get_all_clients()
+      |> Enum.each(fn {client_pid, %{socket: client_socket}} ->
+        if client_pid != sender_pid do
+          case :ssl.send(client_socket, raw_msg) do
+            :ok ->
+              :ok
+
+            {:error, reason} ->
+              Logger.warning("Broadcast to #{inspect(client_pid)} failed: #{inspect(reason)}")
+              :ssl.close(client_socket)
+              Registry.unregister(ClientRegistry, client_pid)
+          end
+        end
+      end)
+
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, :normal}, %{accept_monitor: ref} = state) do
+    {:noreply, %{state | accept_monitor: nil}}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{accept_monitor: ref} = state) do
+    Logger.error("Accept loop crashed: #{inspect(reason)}. Restarting...")
+
+    {_pid, new_ref} =
+      spawn_monitor(fn ->
+        accept_loop(state.listen_socket, state.password_hash, state.max_global_connections)
+      end)
+
+    {:noreply, %{state | accept_monitor: new_ref}}
   end
 
   def handle_info({:DOWN, _monitor_ref, :process, client_pid, reason}, state) do
@@ -148,14 +217,19 @@ defmodule ChatServer.Server do
     {:noreply, state}
   end
 
+  def handle_info({:EXIT, _pid, :normal}, state) do
+    {:noreply, state}
+  end
+
   def handle_info({:EXIT, pid, reason}, state) do
     Logger.warning("Process #{inspect(pid)} died: #{inspect(reason)}")
-    {:noreply, state}
+    {:stop, reason, state}
   end
 
   def terminate(reason, state) do
     Logger.warning("Shutting down server, reason: #{inspect(reason)}")
     :ssl.close(state.listen_socket)
+    CertificateManager.cleanup()
     :ok
   end
 
@@ -177,33 +251,50 @@ defmodule ChatServer.Server do
     end
   end
 
-  defp accept_loop(listen_socket, password_hash) do
+  defp accept_loop(listen_socket, password_hash, max_global_connections) do
     case :ssl.transport_accept(listen_socket) do
       {:ok, socket} ->
-        case :ssl.handshake(socket) do
+        case :ssl.handshake(socket, @handshake_timeout) do
           {:ok, ssl_socket} ->
-            Logger.info("New client connected, waiting for auth...")
+            if connection_allowed?(ssl_socket) do
+              total_clients = ClientRegistry.get_all_clients() |> Enum.count()
 
-            child_spec = %{
-              id: :client_process,
-              start: {Task, :start_link, [fn -> client_loop(ssl_socket, password_hash) end]},
-              restart: :temporary
-            }
+              if total_clients < max_global_connections do
+                Logger.info("New client connected, waiting for auth...")
 
-            case DynamicSupervisor.start_child(ClientSupervisor, child_spec) do
-              {:ok, _pid} ->
-                accept_loop(listen_socket, password_hash)
+                child_spec = %{
+                  id: :client_process,
+                  start:
+                    {Task, :start, [fn -> client_loop(ssl_socket, password_hash) end]},
+                  restart: :temporary
+                }
 
-              {:error, reason} ->
-                Logger.warning("Failed to start client process: #{inspect(reason)}")
+                case DynamicSupervisor.start_child(ClientSupervisor, child_spec) do
+                  {:ok, _pid} ->
+                    accept_loop(listen_socket, password_hash, max_global_connections)
+
+                  {:error, reason} ->
+                    Logger.warning("Failed to start client process: #{inspect(reason)}")
+                    :ssl.close(ssl_socket)
+                    accept_loop(listen_socket, password_hash, max_global_connections)
+                end
+              else
+                Logger.warning(
+                  "Server at capacity (#{total_clients} >= #{max_global_connections}), rejecting connection"
+                )
+
                 :ssl.close(ssl_socket)
-                accept_loop(listen_socket, password_hash)
+                accept_loop(listen_socket, password_hash, max_global_connections)
+              end
+            else
+              :ssl.close(ssl_socket)
+              accept_loop(listen_socket, password_hash, max_global_connections)
             end
 
           {:error, reason} ->
             Logger.warning("SSL handshake failed: #{inspect(reason)}")
             :ssl.close(socket)
-            accept_loop(listen_socket, password_hash)
+            accept_loop(listen_socket, password_hash, max_global_connections)
         end
 
       {:error, :closed} ->
@@ -213,10 +304,9 @@ defmodule ChatServer.Server do
       {:error, _} = err ->
         Logger.warning("Accept error: #{inspect(err)}")
         :timer.sleep(1000)
-        accept_loop(listen_socket, password_hash)
+        accept_loop(listen_socket, password_hash, max_global_connections)
     end
   end
-
   defp client_loop(socket, password_hash) do
     case :ssl.peername(socket) do
       {:ok, {ip, _port}} ->
@@ -239,9 +329,15 @@ defmodule ChatServer.Server do
 
               :ssl.send(socket, Protocol.encode_message(auth_response))
               Logger.warning("Authentication failed for client #{username} from #{readable_ip}")
+              :timer.sleep(1000)
               :ssl.close(socket)
               exit(:normal)
             end
+
+          {:ok, _other} ->
+            Logger.warning("Received unexpected message before auth from #{readable_ip}")
+            :ssl.close(socket)
+            exit(:normal)
 
           {:error, reason} ->
             Logger.warning(
@@ -261,30 +357,6 @@ defmodule ChatServer.Server do
 
   defp read_full_message(socket) do
     case :ssl.recv(socket, 4, @recv_timeout) do
-      {:ok, <<"MSGE">>} ->
-        case :ssl.recv(socket, 4, @recv_timeout) do
-          {:ok, <<0, 0, 0, 0>>} ->
-            {:kill_command}
-
-          {:ok, message} ->
-            header = <<"MSGE">> <> message
-            size = :binary.decode_unsigned(header, :big)
-
-            if size > @max_message_size do
-              Logger.warning("Message too large: #{size}")
-              {:error, :message_too_large}
-            else
-              case :ssl.recv(socket, size, @recv_timeout) do
-                {:ok, body} ->
-                  {:ok, header <> body}
-
-                error ->
-                  Logger.warning("Recv body error: #{inspect(error)}")
-                  error
-              end
-            end
-        end
-
       {:ok, header} ->
         size = :binary.decode_unsigned(header, :big)
 
@@ -310,10 +382,6 @@ defmodule ChatServer.Server do
 
   defp message_loop(socket) do
     case read_full_message(socket) do
-      {:kill_command} ->
-        Logger.warning("KILL command received")
-        GenServer.cast(__MODULE__, :stop)
-
       {:ok, binary_data} ->
         GenServer.cast(__MODULE__, {:message, self(), binary_data})
         message_loop(socket)

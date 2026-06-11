@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -e
+
+cleanup() {
+  rm -f cert.pem key.pem server_fingerprint.txt
+}
+
+trap cleanup EXIT
+
+# --erl "-kernel sigint stop" makes Ctrl+C stop the VM cleanly
+# instead of showing the Erlang BREAK menu
+ELIXIR_ERL_OPTIONS="-kernel sigint stop" mix run --no-halt
