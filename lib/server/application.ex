@@ -25,7 +25,7 @@ defmodule ChatServer.Application do
 
   ### Interactive Input
   If no environment variable is set, the application will prompt for password input:
-      Enter server password:
+      Set chat password:
 
   ### Docker/Non-Interactive Environments
   In environments where stdin is not available, you must use the environment variable.
@@ -37,7 +37,7 @@ defmodule ChatServer.Application do
 
       # Or let it prompt interactively
       mix run --no-halt
-      # Enter server password: mypass
+      # Set chat password: mypass
 
   The application uses a `:one_for_one` supervision strategy, meaning if any
   child process crashes, only that process will be restarted.
@@ -73,7 +73,7 @@ defmodule ChatServer.Application do
   end
 
   defp try_interactive_input do
-    case :io.get_line(:standard_io, "Enter server password: ") do
+    case :io.get_line(:standard_io, "Set chat password: ") do
       {:error, :enotsup} ->
         fallback_password("stdin not supported")
 

@@ -106,7 +106,7 @@ mix run --no-halt
 
 ```bash
 mix run --no-halt
-# Enter server password: mysecretpassword
+# Set chat password: mysecretpassword
 ```
 
 > In non-interactive environments (Docker, CI) you **must** use the
@@ -118,7 +118,7 @@ mix run --no-halt
 When started, the server will display:
 
 ```
-Enter server password:
+Set chat password:
 Server password set successfully...
 
 ======================================================================

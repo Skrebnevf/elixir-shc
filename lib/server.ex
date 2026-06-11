@@ -369,13 +369,11 @@ defmodule ChatServer.Server do
               {:ok, header <> body}
 
             error ->
-              Logger.warning("Recv body error: #{inspect(error)}")
               error
           end
         end
 
       error ->
-        Logger.warning("Recv header error: #{inspect(error)}")
         error
     end
   end
